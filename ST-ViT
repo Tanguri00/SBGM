@@ -1,0 +1,78 @@
+class ResidualAttentionBlock(nn.Module):
+    def __init__(self, d_model: int, n_head: int, a:bool, attn_mask=None, scale=0.3,drop_path=0.,dropout=0.3):
+        super().__init__()
+        # self.att = ParallelSTConv3D(d_model, n_head)
+        # self.att = PoolingMultiheadAttention(768, n_head)
+        self.dropout = nn.Dropout(dropout)
+        self.attn = nn.MultiheadAttention(d_model, n_head)
+        self.ln_1 = LayerNorm(d_model)
+        self.mlp = nn.Sequential(OrderedDict([
+            ("c_fc", nn.Linear(d_model, d_model * 4)),
+            ("gelu", QuickGELU()),
+            ("c_proj", nn.Linear(d_model * 4, d_model))
+        ]))
+        self.ln_2 = LayerNorm(d_model)
+        self.attn_mask = attn_mask
+        self.MLP_Adapter = Adapter(d_model, skip_connect=False)
+        self.S_Adapter = Adapter(d_model)
+        self.T_Adapter = Adapter(d_model, skip_connect=False)
+        self.n_head = n_head
+        self.a=a
+        self.scale = scale
+        self.fusion_gate = FusionGate(d_model)
+
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+
+
+    def attention(self, x: torch.Tensor):
+        attn_mask_ = self.attn_mask
+        if self.attn_mask is not None and hasattr(self.attn_mask, '__call__'):
+            attn_mask_ = self.attn_mask(x.size(0))   # LND
+            # print(attn_mask_,"attn_mask_")
+        # if not isinstance(attn_mask_, torch.Tensor):
+        #     attn_mask_ = None
+            # 处理 attn_mask_ 不是张量的情况
+
+        attn_mask_ = attn_mask_.to(dtype=x.dtype, device=x.device) if attn_mask_ is not None else None
+
+        return self.attn(x, x, x, need_weights=False, attn_mask=attn_mask_)[0]
+
+
+    def forward(self, x_tuple: tuple):
+        x, video_frame = x_tuple
+        # print("x.shape",x.shape)  #文本尺寸 [32, 32, 512]  视觉尺寸 [50, 256, 768]
+        l,n,d = x.shape#[50,256,768]
+        m = int(n/ video_frame)
+        v = int(video_frame)
+        if self.a:
+            # print(x.shape,"x")
+            #[8,50*32,768]
+            #时间
+            xt = x.reshape(l, v, m, d)#[50,8,32,768]
+            xt = xt.permute(1, 0, 2, 3)  # [T, L, N', D] = [8, 50, 32, 768]
+            xt = xt.reshape(v, l * m, d)  # [T, L*N', D] = [8, 1600, 768]
+            xt = self.attention(self.ln_1(xt))
+            xt = xt.reshape(v, l, m, d)
+            xt = xt.permute(1, 0, 2, 3)
+            xt = xt.reshape(l, v * m, d)
+
+            # x = x + self.drop_path(xt)
+            xt = self.drop_path(xt)
+            #空间
+            # x = x + self.S_Adapter(self.attention(self.ln_1(x)))
+            xs = self.attention(self.ln_1(x))
+            xs = self.drop_path(xs)
+
+            # x = self.fusion_gate(x,xt,xs)
+            x = x  + xs + 0.2 * xt# ...
+
+            ## joint adaptation
+            xn = self.ln_2(x)
+            # x = x + self.mlp(xn) + self.drop_path(self.scale * self.MLP_Adapter(xn))
+            x = x + self.mlp(xn)
+        else:
+            x = x +self.attention(self.ln_1(x))
+            xn = self.ln_2(x)
+            x = x + self.mlp(xn)
+
+        return (x, video_frame)
