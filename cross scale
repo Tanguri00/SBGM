@@ -1,0 +1,40 @@
+ def adapter_vt(self, text ,image):
+        #torch.Size([32, 1, 512]) torch.Size([32, t, 512]) s,v
+        # 扩展文本特征
+        text1 = text
+        text = text.repeat(1, 8, 1)  # [32, 1, 512] -> [32, 8, 512]
+        num_classes = text.shape[1]
+        # print(image.shape,text.shape,"imm,tttt")
+        # print(image.dtype,text.dtype)
+
+        _image_features = self.image_downsample(image)#([32, 8, 32])
+        _text_features = self.text_downsample(text)#([32, 8, 32)
+
+        input_seq = torch.cat([_text_features, _image_features], dim=1)#([32, 16, 32])
+
+        _image_features = _image_features.permute(1, 0, 2)  # [t,batch_size,embed_dim]
+        _text_features = _text_features.permute(1, 0, 2)  # [8,batch_size, embed_dim]
+        input_seq = input_seq.permute(1, 0, 2)
+
+        tr_outputs = self.mmha.forward(input_seq)
+        # _text_features, _image_features = self.cro(_text_features,_image_features)
+        # input_seq = input_seq + tr_outputs
+
+        _image_features = tr_outputs[num_classes:]  # [t, batch_size, embed_dim]
+        _text_features = tr_outputs[:num_classes]  # [1, batch_size, embed_dim]
+
+        # print(_image_features.shape,_text_features.shape,"im,te")
+        # torch.Size([8, 32, 32]) torch.Size([1, 32, 32]) im,te
+        _image_features = self.im_hyper(_image_features)
+        # _text_features = self.te_hyper(_text_features)
+
+        _image_features = self.image_upsample(_image_features)#[8,32,512]
+        _text_features = self.text_upsample(_text_features)#[1,32,512]
+
+        # _image_features = _image_features.transpose(1, 2)
+        # print(_image_features.shape, _text_features.shape, "im,te")
+        _text_features = torch.mean(_text_features, dim=0, keepdim=True)  # [ 8, 32, 512] -> [ 1, 32,512]
+        text_features = text1 + _text_features.permute(1, 0, 2)
+        image_features = image + _image_features.permute(1, 0, 2)
+
+        return text_features, image_features
